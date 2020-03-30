@@ -1,4 +1,5 @@
 # Original - https://stackoverflow.com/questions/3548495/download-extract-and-read-a-gzip-file-in-python
+# URL - https://covid-19-threat-list.domaintools.com/
 # Python2
 import urllib2, gzip, StringIO
 
